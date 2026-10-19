@@ -7,7 +7,6 @@ function cleanText(text) {
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/<[^>]*>/g, "").trim();
 }
 
-// Repara las rutas incompletas del JSON de LaMovie para que Kino dibuje las carátulas//
 function getImgUrl(path) {
   if (!path) return null;
   if (path.startsWith('http')) return path;
@@ -27,24 +26,28 @@ function extractItems(json) {
     const isSerie = post.type === 'tvshows' || post.type === 'animes';
     
     let qualityBadge = post.quality && post.quality.length > 0 ? "[HD] " : "";
+    
+    // MEJORA: Soporte para Modo Tarjetas asegurando un backdrop
+    const posterImg = getImgUrl(post.images?.poster || post.still_path);
+    const backdropImg = getImgUrl(post.images?.backdrop) || posterImg;
 
     return {
       id: "lamovie-" + post._id,
       ref: `https://lamovie.org/${route}/${post.slug}/`,
       title: `${qualityBadge}${post.title}`,
       kind: isSerie ? "series" : "movie",
-      poster: getImgUrl(post.images?.poster || post.still_path),
-      backdrop: getImgUrl(post.images?.backdrop),
+      poster: posterImg,
+      backdrop: backdropImg, 
       year: post.release_date ? parseInt(post.release_date.substring(0, 4)) : null,
-      overview: post.overview || "",
-      originalType: post.type // Lo guardamos para ordenar el Home
+      overview: post.overview || "", // Expone la sinopsis desde la tarjeta
+      originalType: post.type 
     };
   });
 }
 
-// --- HOME VÍA API (Idéntico a la web original) ---
+// --- HOME ---
 export async function home() {
-  const res = await kino.fetch("https://lamovie.org/wp-api/v1/listing/up", { headers: { "User-Agent": UA } });
+  const res = await kino.fetch("https://lamovie.org/wp-api/v1/listing/up?page=1", { headers: { "User-Agent": UA } });
   if (!res.ok) return [];
   const json = await res.json();
   const allItems = extractItems(json);
@@ -54,9 +57,9 @@ export async function home() {
   const series = allItems.filter(i => i.originalType === "tvshows");
   const animes = allItems.filter(i => i.originalType === "animes");
 
-  if (peliculas.length > 0) categories.push({ id: "h-peliculas", title: "🎬 Películas Recién Añadidas", ref: "/peliculas", items: peliculas });
-  if (series.length > 0) categories.push({ id: "h-series", title: "📺 Series Recién Añadidas", ref: "/series", items: series });
-  if (animes.length > 0) categories.push({ id: "h-animes", title: "🎌 Animes", ref: "/animes", items: animes });
+  if (peliculas.length > 0) categories.push({ id: "h-peliculas", title: "🎬 Películas Recién Añadidas", ref: "peliculas", items: peliculas });
+  if (series.length > 0) categories.push({ id: "h-series", title: "📺 Series Recién Añadidas", ref: "tvshows", items: series });
+  if (animes.length > 0) categories.push({ id: "h-animes", title: "🎌 Animes", ref: "animes", items: animes });
 
   return categories;
 }
@@ -70,49 +73,55 @@ export async function section({ tab } = {}) {
   ];
 
   const chosen = tabs.some((t) => t.id === tab) ? tab : "peliculas";
-  const rows = [];
-  
-  const res = await kino.fetch("https://lamovie.org/wp-api/v1/listing/up", { headers: { "User-Agent": UA } });
-  const json = res.ok ? await res.json() : null;
-  const allItems = extractItems(json);
-
   const typeMap = { 'peliculas': 'movies', 'series': 'tvshows', 'animes': 'animes' };
-  let items = allItems.filter(i => i.originalType === typeMap[chosen]);
+  const routeParam = typeMap[chosen];
 
-  let hero = { title: "LaMovie", text: "Explora el mejor contenido." };
+  // Filtramos directamente desde la API para que cargue solo la pestaña que queremos
+  const res = await kino.fetch(`https://lamovie.org/wp-api/v1/listing/up?postType=${routeParam}&page=1`, { headers: { "User-Agent": UA } });
+  const json = res.ok ? await res.json() : null;
+  const items = extractItems(json);
+
+  let hero = { title: "Cine Premiere", text: "Explora el mejor contenido." };
+  const rows = [];
+
   if (items.length > 0) {
     hero = { title: items[0].title, text: items[0].overview || "Contenido destacado.", image: items[0].backdrop || items[0].poster };
-    rows.push({ id: `s-${chosen}`, title: `Catálogo de ${chosen}`, ref: `/${chosen}`, items: items });
+    rows.push({ id: `s-${chosen}`, title: `Catálogo de ${chosen}`, ref: routeParam, items: items });
   }
 
   return { tabs, tab: chosen, hero, rows };
 }
 
-// --- BUSCADOR VÍA API (RUTA EXACTA DESCUBIERTA) ---
+// --- BUSCADOR ---
 export async function search(query) {
   if (!query || !query.q) return [];
   const term = encodeURIComponent(query.q);
-
-  // Usamos exactamente tu ruta maestra con postType=any para traer Películas y Series juntas
   const url = `https://lamovie.org/wp-api/v1/search?filter=%7B%7D&postType=any&q=${term}&postsPerPage=40`;
 
   try {
     const res = await kino.fetch(url, { headers: { "User-Agent": UA } });
-    if (res.ok) {
-      const json = await res.json();
-      return extractItems(json);
-    }
+    if (res.ok) return extractItems(await res.json());
   } catch (e) {}
 
   return [];
 }
 
-// --- BROWSE (PAGINACIÓN API) ---
+// --- BROWSE (PAGINACIÓN REAL) ---
 export async function browse(ref, cursor) {
-  // Evitamos error en scroll infinito
-  const res = await kino.fetch("https://lamovie.org/wp-api/v1/listing/up", { headers: { "User-Agent": UA } });
+  const page = cursor ? parseInt(cursor, 10) : 1;
+  const postType = ref || "movies"; // "movies", "tvshows", o "animes"
+  
+  const res = await kino.fetch(`https://lamovie.org/wp-api/v1/listing/up?postType=${postType}&page=${page}`, { headers: { "User-Agent": UA } });
   if (!res.ok) return { items: [] };
-  return { items: extractItems(await res.json()), next: null };
+  
+  const json = await res.json();
+  const items = extractItems(json);
+  
+  return { 
+    items: items, 
+    // Si la API devolvió items, permitimos pedir la siguiente página
+    next: items.length > 0 ? String(page + 1) : null 
+  };
 }
 
 // --- EXTRACCIÓN DE METADATOS Y CAPÍTULOS ---
@@ -138,8 +147,9 @@ export async function episodes(ref) {
   }
 
   const episodesList = [];
+  const isSerie = ref.includes('/series/') || ref.includes('/animes/') || ref.includes('/doramas/');
 
-  if (ref.includes('/series/') || ref.includes('/animes/') || ref.includes('/doramas/')) {
+  if (isSerie) {
     const idMatch = html.match(/\?p=(\d+)/);
     if (idMatch) {
       const seriesId = idMatch[1];
@@ -153,11 +163,10 @@ export async function episodes(ref) {
         
         if (!epJson || !epJson.data || !epJson.data.posts || epJson.data.posts.length === 0) break; 
         
-           for (const ep of epJson.data.posts) {
+        for (const ep of epJson.data.posts) {
            episodesList.push({
               season: ep.season_number,
               number: ep.episode_number,
-              // ESTA ES LA LÍNEA CRÍTICA QUE DEBES ACTUALIZAR:
               ref: `https://lamovie.org/episodio/${ep.slug}/?id=${ep._id}`, 
               title: `Episodio ${ep.episode_number}`,
               overview: ep.overview || "",
@@ -167,31 +176,30 @@ export async function episodes(ref) {
         currentSeason++;
       }
     }
-    if (episodesList.length === 0) episodesList.push({ season: 1, number: 1, ref: ref, title: "Reproducir Serie (Automático)" });
+    if (episodesList.length === 0) episodesList.push({ season: 1, number: 1, ref: ref, title: "Reproducir Serie" });
+    
+    // Si es serie, devolvemos 'series'
+    return { series: metadata, episodes: episodesList };
+    
   } else {
-    episodesList.push({ season: 1, number: 1, ref: ref, title: "Reproducir Película" });
+    episodesList.push({ season: 1, number: 1, ref: ref, title: "Reproducir Película", overview: metadata.overview });
+    
+    // MEJORA: Si es película, devolvemos 'movie' y exponemos el overview para la TV
+    return { movie: metadata, overview: metadata.overview || "", episodes: episodesList };
   }
-
-  return { series: metadata, episodes: episodesList };
 }
 
-// --- REPRODUCTOR BLINDADO CON AUTOPLAY FORZADO ---
+// --- REPRODUCTOR BLINDADO ---
 export async function resolve(ref) {
   
   async function extractVideo(url) {
     let streamUrl = null;
     let streamHeaders = { "Referer": url, "User-Agent": UA };
 
-    // TRUCO MAESTRO: Forzamos el autoplay en la URL para que el reproductor arranque sin clics
     const autoUrl = url + (url.includes('?') ? '&' : '?') + 'autoplay=1&autoPlay=1&autostart=true';
 
-    // PLAN A: Ataque Rápido + Desencriptador JS
     try {
-      const rPage = await kino.fetch(url, {
-        headers: { "Accept": "text/html", "Referer": "https://lamovie.org/", "User-Agent": UA },
-        timeoutMs: 8000
-      });
-      
+      const rPage = await kino.fetch(url, { headers: { "Accept": "text/html", "Referer": "https://lamovie.org/", "User-Agent": UA }, timeoutMs: 8000 });
       if (rPage.ok) {
         const html = await rPage.text();
         const findStreamInCode = (code) => {
@@ -224,12 +232,8 @@ export async function resolve(ref) {
       }
     } catch (err) {}
 
-    // PLAN B: Navegador Oculto con el Autoplay Forzado
     if (!streamUrl) {
-      const page = await kino.browser.capture(autoUrl, {
-        headers: { "Referer": "https://lamovie.org/" },
-        timeoutMs: 25000
-      });
+      const page = await kino.browser.capture(autoUrl, { headers: { "Referer": "https://lamovie.org/" }, timeoutMs: 25000 });
       if (page && page.media && page.media.length > 0) {
         const validMedia = page.media.find(m => m.url.includes('.m3u8') || m.url.includes('.mp4')) || page.media[0];
         streamUrl = validMedia.url;
@@ -241,14 +245,12 @@ export async function resolve(ref) {
     throw new Error("No se pudo interceptar el video.");
   }
 
-  // Si el usuario elige una copia del menú HQ
   if (ref.includes("|||")) {
     const parts = ref.split("|||");
     const stream = await extractVideo(parts[1]);
     return { url: stream.url, headers: stream.headers };
   }
 
-  // Obtenemos el ID
   let postId = null;
   const refIdMatch = ref.match(/[?&]id=(\d+)/);
   if (refIdMatch) {
